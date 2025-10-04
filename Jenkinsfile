@@ -1,9 +1,15 @@
 pipeline {
   agent any
 
+  // If you use host Docker socket instead of DinD, delete the three DOCKER_* lines.
   environment {
     IMAGE_NAME = "govin55/assignment2"
     IMAGE_TAG  = "build-${env.BUILD_NUMBER}"
+
+    // DinD connectivity (keep if you're using docker:27-dind)
+    DOCKER_HOST       = 'tcp://docker:2376'
+    DOCKER_TLS_VERIFY = '1'
+    DOCKER_CERT_PATH  = '/certs/client'
   }
 
   stages {
@@ -11,81 +17,55 @@ pipeline {
       steps { checkout scm }
     }
 
-    // Install deps using Node 16 container (no docker-agent plugin)
-    stage('Install dependencies') {
-      agent {
-        docker {
-          image 'docker:27-cli'
-          args  '-v /certs/client:/certs/client:ro'
-          reuseNode true
-        }
+    stage('Docker sanity') {
+      steps {
+        sh '''
+          echo "Checking Docker connectivity…"
+          docker version
+        '''
       }
-      environment {
-        DOCKER_HOST       = 'tcp://docker:2376'
-        DOCKER_TLS_VERIFY = '1'
-        DOCKER_CERT_PATH  = '/certs/client'
-      }
+    }
+
+    stage('Install dependencies (Node 16)') {
       steps {
         sh '''
           docker run --rm \
-            -v "$PWD":/app:Z -w /app \
+            -v "$PWD":/app -w /app \
             node:16 bash -lc "npm install --save"
         '''
       }
     }
 
-    stage('Unit tests') {
-      agent {
-        docker {
-          image 'docker:27-cli'
-          args  '-v /certs/client:/certs/client:ro'
-          reuseNode true
-        }
-      }
-      environment {
-        DOCKER_HOST       = 'tcp://docker:2376'
-        DOCKER_TLS_VERIFY = '1'
-        DOCKER_CERT_PATH  = '/certs/client'
-      }
+    stage('Unit tests (Node 16)') {
       steps {
         sh '''
           docker run --rm \
-            -v "$PWD":/app:Z -w /app \
+            -v "$PWD":/app -w /app \
             node:16 bash -lc "npm test || echo 'No tests found — continuing'"
         '''
       }
       post {
         always {
+          // Keep if you output junit.xml; harmless if not present
           junit allowEmptyResults: true, testResults: 'junit.xml'
         }
       }
     }
 
-    // Dependency scan (OWASP) — fails on High/Critical
     stage('Dependency Scan (OWASP)') {
-      agent {
-        docker {
-          image 'docker:27-cli'
-          args  '-v /certs/client:/certs/client:ro'
-          reuseNode true
-        }
-      }
-      environment {
-        DOCKER_HOST       = 'tcp://docker:2376'
-        DOCKER_TLS_VERIFY = '1'
-        DOCKER_CERT_PATH  = '/certs/client'
-      }
       steps {
         sh '''
           mkdir -p .depcheck
+          # Run OWASP Dependency-Check in a container against the workspace
           docker run --rm \
-            -v "$PWD":/src:Z \
-            -v "$PWD/.depcheck":/report:Z \
+            -v "$PWD":/src \
+            -v "$PWD/.depcheck":/report \
             owasp/dependency-check:latest \
             --scan /src \
             --format "XML,HTML" \
             --out /report || true
 
+          # Fail the build on High/Critical findings
           if [ -f .depcheck/dependency-check-report.xml ]; then
             HIGHS=$(grep -o 'severity="High"' .depcheck/dependency-check-report.xml | wc -l || true)
             CRITS=$(grep -o 'severity="Critical"' .depcheck/dependency-check-report.xml | wc -l || true)
@@ -105,20 +85,7 @@ pipeline {
       }
     }
 
-    // Build & push (DinD)
     stage('Docker build & push') {
-      agent {
-        docker {
-          image 'docker:27-cli'
-          args  '-v /certs/client:/certs/client:ro'
-          reuseNode true
-        }
-      }
-      environment {
-        DOCKER_HOST       = 'tcp://docker:2376'
-        DOCKER_TLS_VERIFY = '1'
-        DOCKER_CERT_PATH  = '/certs/client'
-      }
       steps {
         withCredentials([usernamePassword(
           credentialsId: 'dockerhub-credentials-id',
@@ -137,5 +104,7 @@ pipeline {
     }
   }
 
-  post { always { cleanWs() } }
+  post {
+    always { cleanWs() }
+  }
 }
