@@ -3,7 +3,7 @@ pipeline {
 
   environment {
     // CHANGE THIS to your Docker Hub repo, e.g., govin50/my-express-app
-    IMAGE_NAME = "yourdockerhubusername/my-express-app"
+    IMAGE_NAME = "govin55/assignment2"
     IMAGE_TAG  = "build-${env.BUILD_NUMBER}"
   }
 
