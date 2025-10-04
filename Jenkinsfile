@@ -6,10 +6,7 @@ pipeline {
     IMAGE_NAME = "govin55/assignment2"
     IMAGE_TAG  = "build-${env.BUILD_NUMBER}"
 
-    // ---- DinD connectivity (keep these for docker:27-dind) ----
-    DOCKER_HOST       = 'tcp://docker:2376'
-    DOCKER_TLS_VERIFY = '1'
-    DOCKER_CERT_PATH  = '/certs/client'
+  
   }
 
   options {
