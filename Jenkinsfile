@@ -48,17 +48,18 @@ pipeline {
       }
     }
 
-    stage('Install dependencies (Node 16)') {
-      steps {
+   stage('Install dependencies (Node 16)') {
+    steps {
         sh '''
-          set -e
-          echo "Installing deps in $APP_DIR"
-          docker run --rm \
-            -v "$PWD/$APP_DIR":/app -w /app \
-            node:16 bash -lc "ls -la; npm install --save"
+            echo "Installing dependencies using Node 16..."
+            docker run --rm \
+                -v $PWD:/app \
+                -w /app \
+                node:16 \
+                bash -c "npm install"
         '''
-      }
     }
+}
 
     stage('Unit tests (Node 16)') {
       steps {
