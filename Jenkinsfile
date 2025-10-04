@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    IMAGE_NAME = "govin55/assignment2"  // TODO: change me
+    IMAGE_NAME = "govin55/assignment2"   // your Docker Hub repo
     IMAGE_TAG  = "build-${env.BUILD_NUMBER}"
   }
 
@@ -22,22 +22,52 @@ pipeline {
       post { always { junit allowEmptyResults: true, testResults: 'junit.xml' } }
     }
 
-    // 🔐 Dependency Vulnerability Gate (Snyk)
-    stage('Dependency Scan (Snyk)') {
-      agent { docker { image 'node:16'; reuseNode true } }
+    // ---- Dependency Vulnerability Gate (OWASP) ----
+    stage('Dependency Scan (OWASP)') {
+      agent {
+        docker {
+          image 'docker:27-cli'
+          args  '-v /certs/client:/certs/client:ro'
+          reuseNode true
+        }
+      }
+      environment {
+        DOCKER_HOST       = 'tcp://docker:2376'
+        DOCKER_TLS_VERIFY = '1'
+        DOCKER_CERT_PATH  = '/certs/client'
+      }
       steps {
-        withCredentials([string(credentialsId: 'snyk-token', variable: 'SNYK_TOKEN')]) {
-          sh '''
-            npm install -g snyk
-            snyk auth "$SNYK_TOKEN"
-            # FAIL the build on high/critical
-            snyk test --severity-threshold=high
-          '''
+        sh '''
+          mkdir -p .depcheck
+          docker run --rm \
+            -v "$PWD":/src:Z \
+            -v "$PWD/.depcheck":/report:Z \
+            owasp/dependency-check:latest \
+            --scan /src \
+            --format "XML,HTML" \
+            --out /report || true
+
+          # Fail the build on High/Critical findings
+          if [ -f .depcheck/dependency-check-report.xml ]; then
+            HIGHS=$(grep -o 'severity="High"' .depcheck/dependency-check-report.xml | wc -l || true)
+            CRITS=$(grep -o 'severity="Critical"' .depcheck/dependency-check-report.xml | wc -l || true)
+            TOTAL=$((HIGHS + CRITS))
+            echo "High: ${HIGHS}, Critical: ${CRITS}, Total: ${TOTAL}"
+            if [ "$TOTAL" -gt 0 ]; then
+              echo "Failing build due to High/Critical vulnerabilities."
+              exit 1
+            fi
+          fi
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: '.depcheck/**', fingerprint: true, allowEmptyArchive: true
         }
       }
     }
 
-    // 🐳 Build & Push image using DinD (Docker-in-Docker)
+    // ---- Build & Push Docker Image (DinD) ----
     stage('Docker build & push') {
       agent {
         docker {
