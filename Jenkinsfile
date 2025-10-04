@@ -1,73 +1,101 @@
 pipeline {
-  /* We’ll pick a stage-specific agent for each step. */
-  agent none
+  agent any
 
   environment {
-    // TODO: change this to YOUR Docker Hub repo (e.g., govin50/my-express-app)
+    // CHANGE THIS to your Docker Hub repo, e.g., govin50/my-express-app
     IMAGE_NAME = "yourdockerhubusername/my-express-app"
     IMAGE_TAG  = "build-${env.BUILD_NUMBER}"
   }
 
   stages {
     stage('Checkout') {
-      agent any
       steps {
         checkout scm
       }
     }
 
     stage('Install dependencies') {
-      agent {
-        docker {
-          image 'node:16'
-          // reuse the same workspace so node_modules stay in place during this stage
-          reuseNode true
-        }
-      }
+      agent { docker { image 'node:16'; reuseNode true } }
       steps {
         sh 'npm install --save'
       }
     }
 
     stage('Unit tests') {
-      agent {
-        docker {
-          image 'node:16'
-          reuseNode true
-        }
-      }
+      agent { docker { image 'node:16'; reuseNode true } }
       steps {
-        // if no tests exist, don’t fail the build
         sh 'npm test || echo "No tests found — continuing"'
       }
       post {
         always {
-          // collect JUnit if your tests produce it (safe to keep allowEmpty)
           junit allowEmptyResults: true, testResults: 'junit.xml'
         }
       }
     }
 
-    stage('Docker build & push') {
-      // Use a proper Docker CLI image just for Docker commands
+    stage('Dependency Scan (OWASP)') {
       agent {
         docker {
           image 'docker:27-cli'
-          // mount the client TLS certs from your Jenkins controller (DinD pattern)
-          args '-v /certs/client:/certs/client:ro'
+          args  '-v /certs/client:/certs/client:ro'
           reuseNode true
         }
       }
       environment {
-        // DinD connection (matches your docker-compose)
         DOCKER_HOST       = 'tcp://docker:2376'
         DOCKER_TLS_VERIFY = '1'
         DOCKER_CERT_PATH  = '/certs/client'
       }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials-id',
-                                          usernameVariable: 'DH_USER',
-                                          passwordVariable: 'DH_PASS')]) {
+        sh '''
+          mkdir -p .depcheck
+          docker run --rm \
+            -v "$PWD":/src:Z \
+            -v "$PWD/.depcheck":/report:Z \
+            owasp/dependency-check:latest \
+            --scan /src \
+            --format "XML,HTML" \
+            --out /report || true
+
+          # Fail build on High/Critical
+          if [ -f .depcheck/dependency-check-report.xml ]; then
+            HIGHS=$(grep -o 'severity="High"' .depcheck/dependency-check-report.xml | wc -l || true)
+            CRITS=$(grep -o 'severity="Critical"' .depcheck/dependency-check-report.xml | wc -l || true)
+            TOTAL=$((HIGHS + CRITS))
+            echo "High: ${HIGHS}, Critical: ${CRITS}, Total: ${TOTAL}"
+            if [ "$TOTAL" -gt 0 ]; then
+              echo "Failing build due to High/Critical vulnerabilities."
+              exit 1
+            fi
+          fi
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: '.depcheck/**', fingerprint: true, allowEmptyArchive: true
+        }
+      }
+    }
+
+    stage('Docker build & push') {
+      agent {
+        docker {
+          image 'docker:27-cli'
+          args  '-v /certs/client:/certs/client:ro'
+          reuseNode true
+        }
+      }
+      environment {
+        DOCKER_HOST       = 'tcp://docker:2376'
+        DOCKER_TLS_VERIFY = '1'
+        DOCKER_CERT_PATH  = '/certs/client'
+      }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub-credentials-id',
+          usernameVariable: 'DH_USER',
+          passwordVariable: 'DH_PASS'
+        )]) {
           sh '''
             echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
             docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
@@ -82,7 +110,6 @@ pipeline {
 
   post {
     always {
-      // keep logs lean between builds
       cleanWs()
     }
   }
