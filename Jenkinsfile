@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    IMAGE_NAME = "govin55/assignment2"   // your Docker Hub repo
+    IMAGE_NAME = "govin55/assignment2"
     IMAGE_TAG  = "build-${env.BUILD_NUMBER}"
   }
 
@@ -11,18 +11,57 @@ pipeline {
       steps { checkout scm }
     }
 
+    // Install deps using Node 16 container (no docker-agent plugin)
     stage('Install dependencies') {
-      agent { docker { image 'node:16'; reuseNode true } }
-      steps { sh 'npm install --save' }
+      agent {
+        docker {
+          image 'docker:27-cli'
+          args  '-v /certs/client:/certs/client:ro'
+          reuseNode true
+        }
+      }
+      environment {
+        DOCKER_HOST       = 'tcp://docker:2376'
+        DOCKER_TLS_VERIFY = '1'
+        DOCKER_CERT_PATH  = '/certs/client'
+      }
+      steps {
+        sh '''
+          docker run --rm \
+            -v "$PWD":/app:Z -w /app \
+            node:16 bash -lc "npm install --save"
+        '''
+      }
     }
 
     stage('Unit tests') {
-      agent { docker { image 'node:16'; reuseNode true } }
-      steps { sh 'npm test || echo "No tests found — continuing"' }
-      post { always { junit allowEmptyResults: true, testResults: 'junit.xml' } }
+      agent {
+        docker {
+          image 'docker:27-cli'
+          args  '-v /certs/client:/certs/client:ro'
+          reuseNode true
+        }
+      }
+      environment {
+        DOCKER_HOST       = 'tcp://docker:2376'
+        DOCKER_TLS_VERIFY = '1'
+        DOCKER_CERT_PATH  = '/certs/client'
+      }
+      steps {
+        sh '''
+          docker run --rm \
+            -v "$PWD":/app:Z -w /app \
+            node:16 bash -lc "npm test || echo 'No tests found — continuing'"
+        '''
+      }
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: 'junit.xml'
+        }
+      }
     }
 
-    // ---- Dependency Vulnerability Gate (OWASP) ----
+    // Dependency scan (OWASP) — fails on High/Critical
     stage('Dependency Scan (OWASP)') {
       agent {
         docker {
@@ -47,7 +86,6 @@ pipeline {
             --format "XML,HTML" \
             --out /report || true
 
-          # Fail the build on High/Critical findings
           if [ -f .depcheck/dependency-check-report.xml ]; then
             HIGHS=$(grep -o 'severity="High"' .depcheck/dependency-check-report.xml | wc -l || true)
             CRITS=$(grep -o 'severity="Critical"' .depcheck/dependency-check-report.xml | wc -l || true)
@@ -67,7 +105,7 @@ pipeline {
       }
     }
 
-    // ---- Build & Push Docker Image (DinD) ----
+    // Build & push (DinD)
     stage('Docker build & push') {
       agent {
         docker {
@@ -99,7 +137,5 @@ pipeline {
     }
   }
 
-  post {
-    always { cleanWs() }
-  }
+  post { always { cleanWs() } }
 }
